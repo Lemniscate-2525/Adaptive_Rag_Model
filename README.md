@@ -1,596 +1,174 @@
-# Adaptive RAG - Agentic AI Chatbot
+# Adaptive RAG
 
-[![Python 3.9+](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-Latest-green.svg)](https://fastapi.tiangolo.com/)
-[![LangGraph](https://img.shields.io/badge/LangGraph-0.5.4-orange.svg)](https://python.langchain.com/langgraph/)
-[![Qdrant](https://img.shields.io/badge/Qdrant-VectorDB-purple.svg)](https://qdrant.tech/)
+A document-question-answering API that chooses between a user's uploaded documents, a direct LLM answer, and web search. When document retrieval is selected, the system checks whether the retrieved text is relevant, rewrites a weak search query, and retries a bounded number of times.
 
-## 📋 Overview
+The repository contains a FastAPI backend, a Streamlit chat interface, a LangGraph workflow, OpenAI models and embeddings, a persistent FAISS index, MongoDB-backed chat history, and Tavily web search.
 
-**Adaptive RAG** is an intelligent, end-to-end Retrieval-Augmented Generation (RAG) system powered by agentic AI architecture. It combines dynamic query routing, intelligent document retrieval, and advanced LLM capabilities to provide accurate, context-aware answers to user queries.
+## What the system does
 
-The system intelligently adapts its retrieval strategy based on query type, utilizing indexed documents, general knowledge, or real-time web search to generate comprehensive responses. Built with a modular architecture using LangGraph for workflow orchestration and multiple storage backends for scalability.
+- Accepts PDF and TXT uploads.
+- Splits readable document text into overlapping chunks and embeds them.
+- Stores chunks in a disk-backed FAISS index scoped to a user namespace.
+- Routes questions to document retrieval, the general LLM, or web search.
+- Grades retrieved evidence before generating a document-grounded answer.
+- Rewrites the retrieval query when evidence is weak, with a maximum of three retrieval attempts by default.
+- Keeps conversation history in MongoDB.
 
----
+## Architecture
 
-## 🎯 Key Features
+### Document ingestion
 
-### 🧠 Intelligent Query Routing
-- **Adaptive Classification**: Automatically routes queries to the most appropriate processing pipeline
-- **Three Query Types**:
-  - **Index**: Queries answerable from uploaded documents
-  - **General**: Queries answerable with general knowledge
-  - **Search**: Queries requiring real-time web search
-
-### 📚 Advanced RAG Pipeline
-- **Document Processing**: Intelligent chunking and embedding of documents
-- **Vector Search**: Fast similarity-based retrieval using Qdrant
-- **Relevance Grading**: Automatic evaluation of retrieved documents
-- **Query Rewriting**: Optimizes queries for better retrieval results
-
-### 🤖 Agentic AI Architecture
-- **Multi-Agent System**: Specialized agents for different tasks
-- **ReAct Framework**: Reasoning and Acting pattern for intelligent decision-making
-- **Tool Integration**: Seamless integration with retrieval tools and web search
-
-### 💾 State Management
-- **MongoDB Backend**: Persistent chat history and session management
-- **Session Tracking**: Individual conversation contexts per user
-- **Memory Management**: Full conversation context retention
-
-### 🎨 User Interface
-- **Streamlit Web App**: Interactive chat interface with document upload
-- **File Support**: PDF and TXT document uploads
-- **Real-time Feedback**: Live chat with instant responses
-
-### ⚡ API-First Architecture
-- **FastAPI Backend**: High-performance REST API
-- **Async Operations**: Non-blocking database and API calls
-- **RESTful Endpoints**: Well-defined API contracts
-
----
-
-## 🏗️ Architecture
-
-### System Components
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         User Interface                          │
-│  ┌──────────────��───────────────────────────────────────��───┐  │
-│  │  Streamlit Web Application                               │  │
-│  │  • Chat Interface                                        │  │
-│  │  • Document Upload (PDF, TXT)                            │  │
-│  │  • Session Management                                    │  │
-│  └──────────────────────────────────────────────────────────��  │
-└───────────────────────────────────────────��─────────────────────┘
-                            ↓
-┌────────────────────────────────────────────────��────────────────┐
-│                       FastAPI Backend                           │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │  REST API Endpoints                                      │  │
-│  │  • POST /rag/query                                       │  │
-│  │  • POST /rag/documents/upload                            │  │
-│  └──────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-                            ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                    LangGraph Orchestration                      │
-│  ┌─────────┐  ┌──────────┐  ┌─────────┐  ┌──────────┐         │
-│  │ Query   │→ │ Classify │→ │ Router  │→ │ Pipeline │         │
-│  │ Analyze │  │ Query    │  │ Output  │  │ Exec     │         │
-│  └─────────┘  └──────────┘  └───��─────┘  └──────────┘         │
-└─────────────────────────────────────────────────────────────────┘
-                            ↓
-        ┌───────��──────────┬────────────────��─┬────────────────┐
-        ↓                  ↓                  ↓                ↓
-   ┌─────────┐       ┌──────────┐      ┌────────────┐   ┌──────────┐
-   │ Retriever│      │ General  │      │ Web Search │   │ Response │
-   │ (Index)  │      │ LLM      │      │ (Tavily)   │   │ Generator│
-   └─────────┘       └──────────┘      └────────────┘   └──────────┘
-        ↓                  ↓                  ↓                ↓
-        └──────────────────┬──────────────────┬────────────────┘
-                           ↓
-            ┌─────────────────────────────────┐
-            │   Response to User               │
-            └─────────────────────────────────┘
+```mermaid
+flowchart TD
+    A[PDF or TXT upload] --> B[FastAPI upload endpoint]
+    B --> C[Validate file and extract text]
+    C --> D[Split into chunks]
+    D --> E[Attach user, document and source metadata]
+    E --> F[OpenAI embeddings]
+    F --> G[User-scoped FAISS index on disk]
+    G --> H[In-process cache with file-change checks]
 ```
 
-### Graph Nodes
+### Query flow
 
-1. **query_analysis**: Analyzes and classifies incoming queries
-2. **retriever**: Retrieves relevant documents from vector store
-3. **grade**: Evaluates relevance of retrieved documents
-4. **rewrite**: Optimizes query for better retrieval results
-5. **generate**: Generates final response from context
-6. **web_search**: Performs real-time web search when needed
-7. **general_llm**: Provides general knowledge answers
-
----
-
-## 📦 Project Structure
-
-```
-AdaptiveRag/
-├── src/                              # Main source code
-│   ��── main.py                       # FastAPI application entry point
-│   ├── api/                          # API routes and endpoints
-│   │   └── routes.py                 # RAG query and document upload endpoints
-│   ├── config/                       # Configuration management
-│   │   ├── settings.py               # Application settings
-│   │   └── prompts.yaml              # LLM prompts and system messages
-│   ├── core/                         # Core utilities
-│   │   ├── config.py                 # Core configuration
-│   │   └── logger.py                 # Logging setup
-│   ├── db/                           # Database layer
-│   │   └── mongo_client.py           # MongoDB client initialization
-│   ├── llms/                         # Language model integrations
-│   │   └── openai.py                 # OpenAI ChatGPT-4o initialization
-│   ├── memory/                       # Chat memory management
-│   │   ├── chat_history_mongo.py     # MongoDB-backed chat history
-│   │   └── chathistory_in_memory.py  # In-memory chat history (fallback)
-│   ├── models/                       # Data models and schemas
-│   │   ├── state.py                  # Graph state definition
-│   │   ├── query_request.py          # Query request schema
-│   │   ├── grade.py                  # Relevance grade model
-│   │   ├── route_identifier.py       # Route classification model
-│   │   └── verification_result.py    # Answer verification model
-│   ├── rag/                          # RAG pipeline implementation
-│   │   ├── graph_builder.py          # LangGraph workflow construction
-│   │   ├── nodes.py                  # Graph node implementations
-│   │   ├── retriever_setup.py        # Vector store and retriever setup
-│   │   ├── document_upload.py        # Document processing and upload
-│   │   └── reAct_agent.py            # ReAct agent setup
-│   └── tools/                        # Utility tools and functions
-│       ├── common_tools.py           # Shared utility functions
-│       └── graph_tools.py            # Graph routing and decision tools
-│
-├── streamlit_app/                    # Streamlit web application
-│   ├── home.py                       # Authentication and login page
-│   ├── pages/                        # Multi-page application
-│   │   └── chat.py                   # Chat interface and document upload
-│   └── utils/                        # Streamlit utilities
-│       └── api_client.py             # Backend API client
-│
-├── README.md                         # This file
-├── requirements.txt                  # Python dependencies
-├── CODE_STYLE_GUIDE.md               # Code formatting standards
-├── QUICK_REFERENCE.md                # Quick reference guide
-├── README_FORMATTING.md              # Formatting documentation
-├── VERIFICATION_CHECKLIST.md         # QA verification checklist
-├── FORMATTING_SUMMARY.md             # Summary of code formatting
-└── DOCUMENTATION_INDEX.md            # Documentation navigation index
+```mermaid
+flowchart TD
+    A[Question + user namespace] --> B[Load conversation history]
+    B --> C[LangGraph: classify question only]
+    C -->|index| D[Search that user's FAISS index]
+    D --> E[Grade retrieved evidence]
+    E -->|relevant| F[Generate using original question + evidence]
+    E -->|not relevant and attempts remain| G[Rewrite retrieval query]
+    G --> D
+    E -->|retry limit reached| H[Tavily web search]
+    C -->|general| I[Direct LLM response]
+    C -->|search| H
+    H --> F
+    F --> J[Return answer and save chat history]
+    I --> J
 ```
 
----
+The classifier does **not** retrieve documents. Retrieval begins only when it selects the `index` route. The original user question is kept separately from the rewritten retrieval query so the final answer still addresses what the user actually asked.
 
-## 🔌 API Endpoints
+## Routing rules
 
-### Base URL
-```
-http://localhost:8000
-```
+| Route | Used for | Path |
+|---|---|---|
+| `index` | Questions about uploaded material | Retrieve → grade → answer, or rewrite and retry |
+| `general` | Conversation and stable common knowledge | Direct LLM response |
+| `search` | Current or external information | Tavily search → answer from search results |
 
-### 1. Query Endpoint
-**Process a RAG query and get intelligent response**
+The classifier makes this choice from the question alone. A document-related question with no matching uploaded evidence can still reach web search after the retrieval limit is exhausted.
 
-```http
-POST /rag/query
-Content-Type: application/json
+## Retrieval, persistence and user isolation
 
-{
-  "query": "What is the main topic of the document?",
-  "session_id": "user_session_123"
-}
-```
+- **Persistent storage:** FAISS indexes are saved under `VECTORSTORE_DIR`, which defaults to `data/vectorstores/`. An index is loaded from disk when needed, so an API process restart does not by itself erase indexed documents.
+- **User namespaces:** Each user ID is hashed into a filesystem-safe directory name. Uploads append to that user's index; query retrieval opens only that namespace.
+- **Cache:** Loaded FAISS objects are cached in the process. The index file signatures are checked so an index changed by another process can be reloaded.
+- **Write coordination:** A per-user file lock coordinates reads and writes to an index on a shared local filesystem.
+- **Metadata:** Chunks include source filename, document ID, chunk number, user ID and the document description.
 
-**Response:**
+This is a practical persistent local-storage design, not a managed distributed vector database. Multiple workers must share the same persistent filesystem for the indexes to be visible to each other. For separate containers, ephemeral hosting disks, or larger deployments, use a shared vector service such as Qdrant instead. The active retrieval code currently uses FAISS; Qdrant is not the active backend.
+
+The user ID is currently supplied by the API client in `X-User-ID` or the query request. It is a **namespace key, not authentication**. A production deployment must validate the caller's identity on the server and derive the namespace from verified credentials rather than trusting a caller-provided header.
+
+## Retry and answer behavior
+
+1. The first retrieval attempt searches with the original question.
+2. If the grader says the evidence is not relevant, the query is rewritten and retrieval is repeated.
+3. The workflow stops retrying after `MAX_RETRIEVAL_ATTEMPTS` attempts (default: `3`).
+4. If evidence remains inadequate, the workflow tries web search instead of looping indefinitely.
+5. The answer prompt receives both the original question and the retrieved context. It instructs the model to state when the evidence is insufficient rather than inventing facts.
+
+Set `MAX_RETRIEVAL_ATTEMPTS` to a positive integer to change the limit. The prompt-level grounding instruction reduces unsupported answers but is not a formal guarantee of factual correctness.
+
+## Main components
+
+| Path | Responsibility |
+|---|---|
+| `src/api/routes.py` | Query and document-upload API endpoints |
+| `src/rag/graph_builder.py` | LangGraph nodes and workflow edges |
+| `src/tools/graph_tools.py` | Route selection and retry-limit decisions |
+| `src/rag/retriever_setup.py` | Persistent per-user FAISS storage, cache and file locking |
+| `src/rag/document_upload.py` | PDF/TXT parsing, chunking, metadata and indexing |
+| `src/config/prompts.yaml` | Classification, grading, rewriting and answer prompts |
+| `src/models/state.py` | State passed between graph nodes |
+| `src/memory/chat_history_mongo.py` | MongoDB conversation history |
+| `streamlit_app/pages/chat.py` | Chat and upload interface |
+| `streamlit_app/utils/api_client.py` | Streamlit-to-FastAPI requests |
+
+## API contract
+
+### `POST /rag/documents/upload`
+
+Multipart form field: `file`
+
+Required headers:
+
+- `X-Description`: a short description of the document.
+- `X-User-ID`: the namespace into which the document should be indexed.
+
+Supports `.pdf` and `.txt`. The response includes the generated document ID and number of indexed chunks. Scanned PDFs without an extractable text layer require OCR, which is not implemented here.
+
+### `POST /rag/query`
+
+JSON request:
+
 ```json
 {
-  "result": {
-    "type": "ai",
-    "content": "Based on the document, the main topic is..."
-  }
+  "query": "What does the document say about indexing?",
+  "session_id": "conversation-session",
+  "user_id": "user-namespace"
 }
 ```
 
-**Parameters:**
-- `query` (string, required): User's question or query
-- `session_id` (string, required): Unique session identifier for conversation tracking
-
-**Status Codes:**
-- `200`: Success
-- `400`: Invalid request format
-- `500`: Server error
-
----
-
-### 2. Document Upload Endpoint
-**Upload documents for RAG indexing**
-
-```http
-POST /rag/documents/upload
-X-Description: Brief description of the document
-
-Form Data:
-- file: <PDF or TXT file>
-```
-
-**Response:**
-```json
-{
-  "status": true
-}
-```
-
-**Headers:**
-- `X-Description` (string, required): Document description for context
-
-**Parameters:**
-- `file` (file, required): PDF or TXT file to upload (max size: depends on system)
-
-**Supported Formats:**
-- PDF (.pdf)
-- Plain Text (.txt)
-
-**Status Codes:**
-- `200`: Successfully uploaded and indexed
-- `400`: Invalid file type or missing description
-- `500`: Processing error
-
----
-
-## 📖 Usage Guide
-
-### 1. Prerequisites
-
-```bash
-# System Requirements
-- Python 3.9 or higher
-- MongoDB (local or cloud)
-- Qdrant vector database
-- OpenAI API key
-- Tavily API key (for web search)
-```
-
-### 2. Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/dhruvsinghal09/Adaptive-Rag.git
-cd AdaptiveRag
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### 3. Environment Configuration
-
-Create a `.env` file in the project root:
-
-```env
-# OpenAI Configuration
-OPENAI_API_KEY=your_openai_api_key_here
-
-# Tavily Search Configuration
-TAVILY_API_KEY=your_tavily_api_key_here
-
-# Qdrant Configuration
-QDRANT_URL=http://localhost:6333
-QDRANT_API_KEY=your_qdrant_api_key
-QDRANT_CODE_COLLECTION=code_documents
-QDRANT_DOCS_COLLECTION=documents
-
-# MongoDB Configuration
-MONGODB_URL=mongodb://localhost:27017
-MONGODB_DB_NAME=adaptive_rag
-```
-
-### 4. Running the Application
-
-**Start FastAPI Backend:**
-```bash
-# Terminal 1: Run FastAPI server
-python -m uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-**Start Streamlit Frontend:**
-```bash
-# Terminal 2: Run Streamlit app
-streamlit run streamlit_app/home.py
-```
-
-**Access the Application:**
-- Web Interface: http://localhost:8501
-- API Documentation: http://localhost:8000/docs
-- ReDoc Documentation: http://localhost:8000/redoc
-
-### 5. Example Usage
-
-**Using the Web Interface:**
-1. Navigate to http://localhost:8501
-2. Create account or login
-3. Upload documents in the sidebar
-4. Start chatting in the main chat area
-
-**Using cURL:**
-```bash
-# Upload a document
-curl -X POST http://localhost:8000/rag/documents/upload \
-  -H "X-Description: Sample document about Python" \
-  -F "file=@document.pdf"
-
-# Query the RAG system
-curl -X POST http://localhost:8000/rag/query \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "Tell me about Python",
-    "session_id": "user_123"
-  }'
-```
-
-**Using Python:**
-```python
-import requests
-
-# Query endpoint
-response = requests.post(
-    "http://localhost:8000/rag/query",
-    json={
-        "query": "What is Python?",
-        "session_id": "user_123"
-    }
-)
-print(response.json())
-```
-
----
-
-## 🔧 Configuration
-
-### Key Configuration Files
-
-#### `config/settings.py`
-```python
-# Core application settings loaded from environment
-OPENAI_API_KEY           # OpenAI API authentication
-TAVILY_API_KEY          # Web search functionality
-QDRANT_URL              # Vector database endpoint
-QDRANT_API_KEY          # Vector database authentication
-MONGODB_URL             # Chat history database
-```
-
-#### `config/prompts.yaml`
-Contains system prompts for:
-- **system_prompt**: ReAct agent system instructions
-- **classify_prompt**: Query classification logic
-- **grading_prompt**: Document relevance evaluation
-- **rewrite_prompt**: Query optimization
-- **generate_prompt**: Response generation
-
-### Query Routing Logic
-
-The system routes queries based on classification:
-
-```
-Query Classification
-├── "index" → Use retriever (indexed documents)
-├── "general" → Use general LLM (common knowledge)
-└── "search" → Use web search (real-time information)
-```
-
----
-
-## 🧪 Testing the API
-
-### Using FastAPI Interactive Documentation
-
-1. Navigate to http://localhost:8000/docs
-2. Expand endpoint sections
-3. Click "Try it out"
-4. Enter test data
-5. Click "Execute"
-
-### Example Test Cases
-
-**Test 1: Simple Query**
-```json
-{
-  "query": "Hello, how are you?",
-  "session_id": "test_user_1"
-}
-```
-
-**Test 2: Document-Based Query**
-```json
-{
-  "query": "What topics are covered in the uploaded document?",
-  "session_id": "test_user_1"
-}
-```
-
-**Test 3: General Knowledge Query**
-```json
-{
-  "query": "What is machine learning?",
-  "session_id": "test_user_1"
-}
-```
-
----
-
-## 🔐 Security Considerations
-
-- Store API keys in `.env` file (never commit)
-- Use environment variables for sensitive data
-- Implement rate limiting for production
-- Validate all user inputs
-- Use HTTPS in production
-- Implement authentication/authorization
-- Secure MongoDB with proper credentials
-
----
-
-## 🚀 Deployment
-
-### Local Development
-```bash
-# Run development server with auto-reload
-python -m uvicorn src.main:app --reload
-```
-
-### Production Deployment
-```bash
-# Run with production settings
-python -m uvicorn src.main:app --host 0.0.0.0 --port 8000 --workers 4
-```
-
-### Docker Support (Optional)
-Create `Dockerfile` and `docker-compose.yml` for containerized deployment.
-
----
-
-## 📊 Performance Optimization
-
-- **Document Chunking**: Configurable chunk size (1000 chars, 150 overlap)
-- **Vector Search**: Efficient similarity search with Qdrant
-- **Async Operations**: Non-blocking I/O for better throughput
-- **Caching**: Query results cached when applicable
-- **Batch Processing**: Document processing in batches
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/YourFeature`)
-3. Make changes following CODE_STYLE_GUIDE.md
-4. Commit with descriptive messages (`git commit -m 'feat: Add YourFeature'`)
-5. Push to your branch (`git push origin feature/YourFeature`)
-6. Open a Pull Request
-
-### Code Quality
-- Follow PEP 8 standards
-- Add docstrings to all functions
-- Write unit tests for new features
-- Update documentation
-- Run linting: `flake8 src/`
-
----
-
-## 📚 Technology Stack
-
-| Component | Technology | Version |
-|-----------|-----------|---------|
-| **LLM Framework** | LangChain | ~0.3.27 |
-| **Workflow Orchestration** | LangGraph | ~0.5.4 |
-| **Web Framework** | FastAPI | Latest |
-| **ASGI Server** | Uvicorn | Latest |
-| **UI Framework** | Streamlit | Latest |
-| **Vector Database** | Qdrant/FAISS | Latest |
-| **Chat Database** | MongoDB/InMemory | Latest |
-| **Document Processing** | LangChain Community | ~0.3.27 |
-| **LLM Provider** | OpenAI | ~0.3.28 |
-| **Web Search** | Tavily | Latest |
-| **Async DB** | Motor | Latest |
-| **Data Validation** | Pydantic | ~2.11.7 |
-
----
-
-## 📝 Documentation References
-
-- [CODE_STYLE_GUIDE.md](CODE_STYLE_GUIDE.md) - Comprehensive coding standards
-- [QUICK_REFERENCE.md](QUICK_REFERENCE.md) - Quick patterns and templates
-- [README_FORMATTING.md](README_FORMATTING.md) - Code formatting overview
-- [VERIFICATION_CHECKLIST.md](VERIFICATION_CHECKLIST.md) - QA checklist
-- [DOCUMENTATION_INDEX.md](DOCUMENTATION_INDEX.md) - Full documentation index
-
----
-
-## ❓ FAQ
-
-**Q: How do I upload multiple documents?**  
-A: Upload one document at a time through the Streamlit interface. Each upload creates a new indexed collection.
-
-**Q: What's the maximum file size?**  
-A: Limited by system memory and Qdrant storage. Typical limit is 100MB per file.
-
-**Q: Can I use different LLM providers?**  
-A: Currently configured for OpenAI. You can modify `src/llms/openai.py` to use other providers.
-
-**Q: How is conversation history stored?**  
-A: MongoDB stores all chat messages with timestamps and session IDs for full context retention.
-
-**Q: Can I run this without web search?**  
-A: Yes, remove Tavily dependency. Queries will use index or general LLM only.
-
----
-
-## 💬 Support & Contact
-
-For issues, questions, or suggestions:
-- Open an [Issue](https://github.com/dhruvsinghal09/Adaptive-Rag/issues)
-- Check existing documentation
-- Review the code comments
-
----
-
-## 🙏 Acknowledgments
-
-- Built with LangChain and LangGraph
-- Vector search powered by Qdrant
-- LLM capabilities by OpenAI
-- Web search by Tavily
-- UI powered by Streamlit
-- Thanks to the open-source community
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## 👤 Author
-
-**Dhruv Singhal**
-- GitHub: [@dhruvsinghal09](https://github.com/dhruvsinghal09)
-- Project: [Adaptive RAG](https://github.com/dhruvsinghal09/Adaptive-Rag)
-
----
-
-## 📈 Project Status
-
-- ✅ Core RAG pipeline implemented
-- ✅ Document upload and indexing
-- ✅ Query routing (index/general/search)
-- ✅ MongoDB chat history
-- ✅ Streamlit web interface
-- ✅ Code formatted and documented
-- 🚀 Production ready
-
----
-
-## 🗺️ Roadmap
-
-- [ ] Enhanced context management
-- [ ] Multi-language support
-- [ ] Performance benchmarks
-- [ ] Extended LLM provider support
-- [ ] Advanced authentication
-- [ ] Real-time collaboration
-- [ ] Analytics dashboard
-- [ ] Cost optimization
-
----
-
-**Last Updated**: March 5, 2026  
-**Status**: ✅ Production Ready  
-**Documentation**: ✅ Comprehensive
+`user_id` selects the document index; `session_id` selects conversation history. If `user_id` is omitted, the API uses `session_id` as the namespace.
+
+## Failure cases and current limits
+
+| Failure case | Current behavior / limitation |
+|---|---|
+| No document uploaded for this user | Retrieval has no index; after the bounded attempts, the workflow tries web search. |
+| Retrieved chunks are unrelated | The grader rejects them; the query is rewritten up to the configured limit. |
+| Tavily fails or returns no usable results | The answer node receives a message that no usable web results were available; the resulting answer may be limited. |
+| OpenAI API key, quota or model call fails | The affected request can fail. There is no general retry/backoff policy for provider errors yet. |
+| Scanned PDF or unsupported file type | Unsupported types are rejected; a PDF with no extractable text returns a readable error and needs OCR upstream. |
+| API process restarts | Indexed documents remain if `VECTORSTORE_DIR` is on persistent storage. |
+| Hosting platform uses ephemeral disk | Indexes can disappear when the platform replaces the instance. Mount persistent storage or use a shared vector service. |
+| Multiple workers on separate filesystems | They do not share local FAISS files. Use shared persistent storage or a vector database service. |
+| Two users upload similar documents | Their indexes remain separate when each request uses the correct, verified user namespace. |
+| Caller spoofs `X-User-ID` | The current API does not verify identity itself. Add server-side authentication and authorization before exposing it publicly. |
+| Two uploads for one user happen concurrently | File locking coordinates index updates on a shared local filesystem; deployment storage must support reliable file locks. |
+| Answer contains unsupported claims | The prompt tells the model to disclose missing evidence, but no automatic final-answer faithfulness check is wired into the graph. Validate answers before treating them as authoritative. |
+| Chat history database is unavailable | Query handling can fail because MongoDB is the configured chat-history store; no durable fallback is wired into the API path. |
+
+## Technology actually used
+
+- **Workflow:** LangGraph
+- **LLM and embeddings:** LangChain OpenAI integration
+- **Vector search:** FAISS, persisted to local disk and separated by user namespace
+- **Web search:** Tavily
+- **API:** FastAPI
+- **Chat history:** MongoDB via Motor
+- **Frontend:** Streamlit
+- **Document loaders:** LangChain PDF and text loaders
+- **Chunking:** Recursive character splitting, 1,000-character chunks with 150-character overlap
+
+Qdrant configuration and an answer-verification prompt exist in the repository, but Qdrant is not the active vector store and the verification prompt is not currently connected to the graph. They are therefore not described as implemented features.
+
+## Configuration
+
+The backend expects provider credentials in environment variables:
+
+- `OPENAI_API_KEY`
+- `TAVILY_API_KEY`
+
+Optional settings:
+
+- `VECTORSTORE_DIR`: persistent index directory; defaults to `data/vectorstores`.
+- `MAX_RETRIEVAL_ATTEMPTS`: retrieval-attempt limit; defaults to `3`.
+- `MONGODB_URL` and `MONGODB_DB_NAME`: MongoDB settings. The current MongoDB client still has hard-coded defaults, so wiring these environment variables into `src/db/mongo_client.py` is a remaining configuration improvement.
+
+## Scope
+
+This project demonstrates adaptive routing, relevance grading, query rewriting, bounded retrieval retries, web-search fallback, persistent user-scoped document indexes, and grounded generation. It is not yet a production-hardened multi-tenant service: authentication enforcement, provider retry/backoff, OCR, automated evaluation, and a connected final-answer faithfulness verifier remain future work.
