@@ -167,7 +167,8 @@ Optional settings:
 
 - `VECTORSTORE_DIR`: persistent index directory; defaults to `data/vectorstores`.
 - `MAX_RETRIEVAL_ATTEMPTS`: retrieval-attempt limit; defaults to `3`.
-- `MONGODB_URL` and `MONGODB_DB_NAME`: MongoDB settings. The current MongoDB client still has hard-coded defaults, so wiring these environment variables into `src/db/mongo_client.py` is a remaining configuration improvement.
+- `MONGODB_URL`: MongoDB connection string; defaults to `mongodb://localhost:27017`.
+- `MONGODB_DB_NAME`: MongoDB database name; defaults to `adaptive_rag`.
 
 ## Scope
 
