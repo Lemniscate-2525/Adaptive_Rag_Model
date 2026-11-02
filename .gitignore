@@ -1,2 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
 venv/
+
+# Secrets and local logs
 .env
+app.log
+
+# Persistent local vector indexes (keep user data out of Git)
+data/vectorstores/
