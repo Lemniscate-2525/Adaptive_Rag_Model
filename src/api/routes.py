@@ -1,9 +1,9 @@
-"""
-API routes for RAG operations.
-"""
+"""API routes for RAG queries and document uploads."""
 
-from fastapi import APIRouter, UploadFile, File, Header
-from langchain_core.messages import HumanMessage, AIMessage
+import asyncio
+
+from fastapi import APIRouter, File, Header, HTTPException, UploadFile
+from langchain_core.messages import AIMessage, HumanMessage
 
 from src.memory.chat_history_mongo import ChatHistory
 from src.models.query_request import QueryRequest
@@ -15,47 +15,28 @@ router = APIRouter()
 
 @router.post("/rag/query")
 async def rag_query(req: QueryRequest):
-    """
-    Process a RAG query and return the result.
-
-    Args:
-        req: The query request containing query text and session_id.
-
-    Returns:
-        The generated response from the RAG pipeline.
-    """
-    #chat_history=ChatInMemoryHistory.get_session_history(req.token)
+    """Run the workflow with chat history and a user-specific document index."""
     chat_history = ChatHistory.get_session_history(req.session_id)
     await chat_history.add_message(HumanMessage(content=req.query))
-
-    # Fetch full history
     messages = await chat_history.get_messages()
-    result = builder.invoke({
-        "messages": messages
-    })
-    output_text = result["messages"][-1].content
 
-    # Save assistant message
-    await chat_history.add_message(AIMessage(content=output_text))
-
-    return {"result": result["messages"][-1]}
+    result = await asyncio.to_thread(
+        builder.invoke,
+        {"messages": messages, "user_id": req.user_id or req.session_id},
+    )
+    output_message = result["messages"][-1]
+    await chat_history.add_message(AIMessage(content=output_message.content))
+    return {"result": output_message}
 
 
 @router.post("/rag/documents/upload")
 async def upload_file(
     file: UploadFile = File(...),
-    description: str = Header(..., alias="X-Description")
+    description: str = Header(..., alias="X-Description"),
+    user_id: str = Header(..., alias="X-User-ID"),
 ):
-    """
-    Upload a document for RAG processing.
-
-    Args:
-        file: The file to upload (PDF or TXT).
-        description: Document description provided via header.
-
-    Returns:
-        Upload status.
-    """
-    status_upload = documents(description, file)
-    return {"status": status_upload}
-
+    """Upload a PDF/TXT file into the caller-supplied user namespace."""
+    if not user_id.strip():
+        raise HTTPException(status_code=400, detail="X-User-ID must not be empty.")
+    result = await asyncio.to_thread(documents, description, file, user_id)
+    return result
