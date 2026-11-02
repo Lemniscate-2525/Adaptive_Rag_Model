@@ -1,11 +1,10 @@
-"""
-Route identifier model.
-"""
+"""Validated route choices produced by the query classifier."""
 
+from typing import Literal
 from pydantic import BaseModel
 
 
 class RouteIdentifier(BaseModel):
-    """Model for routing queries to appropriate nodes."""
+    """The classifier must choose one supported path."""
 
-    route: str
+    route: Literal["index", "general", "search"]
