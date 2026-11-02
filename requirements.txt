@@ -21,3 +21,4 @@ streamlit
 requests
 langchain-qdrant
 python-multipart
+filelock
