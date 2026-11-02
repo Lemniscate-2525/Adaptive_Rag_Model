@@ -66,6 +66,7 @@ The classifier makes this choice from the question alone. A document-related que
 - **User namespaces:** Each user ID is hashed into a filesystem-safe directory name. Uploads append to that user's index; query retrieval opens only that namespace.
 - **Cache:** Loaded FAISS objects are cached in the process. The index file signatures are checked so an index changed by another process can be reloaded.
 - **Write coordination:** A per-user file lock coordinates reads and writes to an index on a shared local filesystem.
+- **Trusted storage only:** LangChain's local FAISS loader deserializes its saved document metadata. Keep the index directory under trusted application control; never load index files supplied by an untrusted user.
 - **Metadata:** Chunks include source filename, document ID, chunk number, user ID and the document description.
 
 This is a practical persistent local-storage design, not a managed distributed vector database. Multiple workers must share the same persistent filesystem for the indexes to be visible to each other. For separate containers, ephemeral hosting disks, or larger deployments, use a shared vector service such as Qdrant instead. The active retrieval code currently uses FAISS; Qdrant is not the active backend.
