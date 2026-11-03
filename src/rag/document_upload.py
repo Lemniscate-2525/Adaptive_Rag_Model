@@ -19,7 +19,7 @@ def documents(description: str, file: UploadFile = File(...), user_id: str = "")
     if suffix not in {".pdf", ".txt"}:
         raise HTTPException(status_code=400, detail="Only PDF and TXT files are supported.")
     if not user_id or not user_id.strip():
-        raise HTTPException(status_code=400, detail="X-User-ID is required.")
+        raise HTTPException(status_code=400, detail="Authenticated user identity is required.")
     if not description or not description.strip():
         raise HTTPException(status_code=400, detail="X-Description is required.")
 
