@@ -13,7 +13,7 @@ from gridfs import GridFSBucket
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
-from pymongo import MongoClient, ReturnDocument
+from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 
 MONGO_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
@@ -122,11 +122,10 @@ def index_documents(user_id: str, chunks: list[Document]) -> int:
             BytesIO(store.serialize_to_bytes()),
             metadata={"user_key": key, "updated_at": datetime.now(timezone.utc)},
         )
-        previous = _index_metadata.find_one_and_update(
+        _index_metadata.update_one(
             {"_id": key},
             {"$set": {"file_id": new_file_id, "updated_at": datetime.now(timezone.utc)}},
             upsert=True,
-            return_document=False,
         )
         _cache[key] = {"file_id": new_file_id, "store": store}
 
