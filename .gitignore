@@ -4,10 +4,16 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+.pytest_cache/
 
-# Secrets and local logs
+# Secrets and logs
 .env
+.streamlit/secrets.toml
 app.log
 
-# Persistent local vector indexes (keep user data out of Git)
+# Local FAISS data
 data/vectorstores/
+
+# IDE
+.idea/
+.vscode/
