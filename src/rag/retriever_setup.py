@@ -3,14 +3,18 @@
 import hashlib
 import os
 import threading
-from datetime import datetime, timezone
+import time
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 from pathlib import Path
 
 from gridfs import GridFSBucket
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
-from pymongo import MongoClient
+from pymongo import MongoClient, ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 MONGO_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
 DB_NAME = os.getenv("MONGODB_DB_NAME", "adaptive_rag")
@@ -20,6 +24,7 @@ _mongo_client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=10000)
 _db = _mongo_client[DB_NAME]
 _bucket = GridFSBucket(_db, bucket_name="faiss_indexes")
 _index_metadata = _db["vector_index_metadata"]
+_index_locks = _db["vector_index_locks"]
 
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 _cache: dict[str, dict] = {}
@@ -36,6 +41,46 @@ def _user_key(user_id: str) -> str:
 def _lock_for(key: str) -> threading.RLock:
     with _cache_guard:
         return _user_locks.setdefault(key, threading.RLock())
+
+
+@contextmanager
+def _distributed_lock(key: str, timeout_seconds: int = 60):
+    """Acquire a MongoDB lease so separate API workers serialize writes per user."""
+    owner = str(uuid4())
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        now = datetime.now(timezone.utc)
+        try:
+            lock_doc = _index_locks.find_one_and_update(
+                {
+                    "_id": key,
+                    "$or": [
+                        {"expires_at": {"$lte": now}},
+                        {"owner": owner},
+                    ],
+                },
+                {
+                    "$set": {
+                        "owner": owner,
+                        "expires_at": now + timedelta(minutes=30),
+                    }
+                },
+                upsert=True,
+                return_document=ReturnDocument.AFTER,
+            )
+            if lock_doc and lock_doc.get("owner") == owner:
+                break
+        except DuplicateKeyError:
+            # Another worker currently owns the unexpired lease.
+            pass
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Timed out waiting for this user's document index lock.")
+        time.sleep(0.1)
+
+    try:
+        yield
+    finally:
+        _index_locks.delete_one({"_id": key, "owner": owner})
 
 
 def _load_locked(key: str):
@@ -65,7 +110,7 @@ def index_documents(user_id: str, chunks: list[Document]) -> int:
         raise ValueError("Cannot index an empty document.")
     key = _user_key(user_id)
 
-    with _lock_for(key):
+    with _lock_for(key), _distributed_lock(key):
         store = _load_locked(key)
         if store is None:
             store = FAISS.from_documents(chunks, embeddings)
@@ -99,7 +144,7 @@ def index_documents(user_id: str, chunks: list[Document]) -> int:
 def get_vectorstore(user_id: str):
     """Return the cached index or reload the latest persisted version from MongoDB."""
     key = _user_key(user_id)
-    with _lock_for(key):
+    with _lock_for(key), _distributed_lock(key):
         return _load_locked(key)
 
 
