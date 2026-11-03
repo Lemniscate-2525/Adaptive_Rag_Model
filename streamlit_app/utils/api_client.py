@@ -1,85 +1,95 @@
-"""HTTP client for the Streamlit frontend."""
+"""HTTP client used by the Streamlit frontend."""
 
-import logging
+import os
 
 import requests
-
-logger = logging.getLogger(__name__)
-
-RUST_BASE_URL = "http://localhost:8080/api"
-PYTHON_BASE_URL = "http://127.0.0.1:8000"
+import streamlit as st
 
 
-def create_user(username: str, password: str, api_token: str) -> bool:
-    headers = {"X-API-TOKEN": api_token, "Content-Type": "application/json"}
+def backend_url() -> str:
+    """Read the backend URL from Streamlit secrets or local environment."""
+    configured = None
+    try:
+        configured = st.secrets.get("BACKEND_URL")
+    except Exception:
+        pass
+    return (configured or os.getenv("BACKEND_URL") or "http://127.0.0.1:8000").rstrip("/")
+
+
+def register_user(username: str, password: str) -> tuple[bool, str]:
     try:
         response = requests.post(
-            f"{RUST_BASE_URL}/create_user",
+            f"{backend_url()}/auth/register",
             json={"username": username, "password": password},
-            headers=headers,
             timeout=20,
         )
-        return response.status_code == 200
-    except requests.RequestException:
-        logger.exception("User creation request failed")
-        return False
+        if response.status_code == 201:
+            return True, response.json().get("message", "Account created.")
+        try:
+            detail = response.json().get("detail", response.text)
+        except ValueError:
+            detail = response.text
+        return False, str(detail)
+    except requests.RequestException as exc:
+        return False, f"Backend connection failed: {exc}"
 
 
-def login_user(username: str, password: str, api_token: str) -> dict | None:
-    headers = {"X-API-TOKEN": api_token, "Content-Type": "application/json"}
+def login_user(username: str, password: str) -> tuple[dict | None, str]:
     try:
         response = requests.post(
-            f"{RUST_BASE_URL}/login",
+            f"{backend_url()}/auth/login",
             json={"username": username, "password": password},
-            headers=headers,
             timeout=20,
-        )
-        return response.json() if response.status_code == 200 else None
-    except (requests.RequestException, ValueError):
-        logger.exception("Login request failed")
-        return None
-
-
-def get_api_token() -> str | None:
-    try:
-        response = requests.post(f"{RUST_BASE_URL}/init", timeout=20)
-        return response.json().get("api_token") if response.status_code == 200 else None
-    except (requests.RequestException, ValueError):
-        logger.exception("API token initialization failed")
-        return None
-
-
-def query_backend(query: str, session_id: str, user_id: str | None = None) -> str:
-    """Send a query with separate conversation and document-owner identifiers."""
-    try:
-        response = requests.post(
-            f"{PYTHON_BASE_URL}/rag/query",
-            json={"query": query, "session_id": session_id, "user_id": user_id or session_id},
-            timeout=120,
         )
         if response.status_code == 200:
-            return response.json()["result"]["content"]
-        return f"Error: {response.status_code} - {response.text}"
+            return response.json(), ""
+        try:
+            detail = response.json().get("detail", response.text)
+        except ValueError:
+            detail = response.text
+        return None, str(detail)
     except requests.RequestException as exc:
-        logger.exception("RAG query request failed")
-        return f"Request failed: {exc}"
+        return None, f"Backend connection failed: {exc}"
 
 
-def document_upload_rag(file, description: str, user_id: str) -> bool:
-    """Upload a file into the specified user's isolated document index."""
-    if not file or not user_id:
-        return False
-    headers = {"X-Description": description, "X-User-ID": user_id}
+def query_backend(query: str, session_id: str, access_token: str) -> str:
     try:
         response = requests.post(
-            f"{PYTHON_BASE_URL}/rag/documents/upload",
-            files={"file": (file.name, file, file.type)},
+            f"{backend_url()}/rag/query",
+            json={"query": query, "session_id": session_id},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=120,
+        )
+        response.raise_for_status()
+        return response.json()["result"]["content"]
+    except requests.RequestException as exc:
+        try:
+            detail = exc.response.json().get("detail", str(exc)) if exc.response else str(exc)
+        except ValueError:
+            detail = str(exc)
+        return f"Request failed: {detail}"
+
+
+def document_upload_rag(file, description: str, access_token: str) -> tuple[bool, str]:
+    if not file or not description.strip():
+        return False, "Select a file and provide a short description."
+    headers = {
+        "X-Description": description.strip(),
+        "Authorization": f"Bearer {access_token}",
+    }
+    try:
+        response = requests.post(
+            f"{backend_url()}/rag/documents/upload",
+            files={"file": (file.name, file.getvalue(), file.type or "application/octet-stream")},
             headers=headers,
             timeout=180,
         )
-        if response.status_code != 200:
-            logger.error("Document upload failed: %s - %s", response.status_code, response.text)
-        return response.status_code == 200
-    except requests.RequestException:
-        logger.exception("Document upload request failed")
-        return False
+        response.raise_for_status()
+        result = response.json()
+        return True, f"Indexed {result['chunks_indexed']} chunks."
+    except requests.RequestException as exc:
+        try:
+            detail = exc.response.json().get("detail", str(exc)) if exc.response else str(exc)
+        except ValueError:
+            detail = str(exc)
+        return False, f"Upload failed: {detail}"
