@@ -11,7 +11,7 @@ from src.llms.openai import llm
 from src.models.grade import Grade
 from src.models.route_identifier import RouteIdentifier
 from src.models.state import State
-from src.rag.retriever_setup import get_vectorstore
+from src.rag.retriever_setup import similarity_search
 from src.tools.graph_tools import doc_tool, routing_tool
 
 config = Config()
@@ -43,9 +43,8 @@ def general_llm(state: State):
 def retriever_node(state: State):
     """Retrieve the top matching chunks from the current user's persisted index."""
     user_id = state.get("user_id") or ""
-    store = get_vectorstore(user_id)
     query = state.get("latest_query") or state.get("original_question") or ""
-    docs = store.similarity_search(query, k=4) if store is not None else []
+    docs = similarity_search(user_id, query, k=4)
     context = "\n\n".join(
         f"[Source: {doc.metadata.get('source', 'uploaded document')} | "
         f"Chunk: {doc.metadata.get('chunk_index', 'n/a')}]\n{doc.page_content}"
