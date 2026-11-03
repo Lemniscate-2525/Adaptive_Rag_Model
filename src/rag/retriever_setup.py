@@ -6,8 +6,8 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from uuid import uuid4
-from pathlib import Path
 
 from gridfs import GridFSBucket
 from langchain_community.vectorstores import FAISS
@@ -119,7 +119,7 @@ def index_documents(user_id: str, chunks: list[Document]) -> int:
 
         new_file_id = _bucket.upload_from_stream(
             f"{key}.faiss",
-            store.serialize_to_bytes(),
+            BytesIO(store.serialize_to_bytes()),
             metadata={"user_key": key, "updated_at": datetime.now(timezone.utc)},
         )
         previous = _index_metadata.find_one_and_update(
@@ -130,13 +130,8 @@ def index_documents(user_id: str, chunks: list[Document]) -> int:
         )
         _cache[key] = {"file_id": new_file_id, "store": store}
 
-        old_file_id = previous.get("file_id") if previous else None
-        if old_file_id and old_file_id != new_file_id:
-            try:
-                _bucket.delete(old_file_id)
-            except Exception:
-                # The new index is already committed; an orphaned old blob is safe.
-                pass
+        # Keep prior snapshots so concurrent readers that already resolved an older
+        # metadata pointer can finish safely. A retention cleanup job can prune them later.
 
     return len(chunks)
 
