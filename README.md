@@ -97,7 +97,7 @@ The active vector store is FAISS. Its serialized index snapshots are stored in *
 - After an upload, the updated FAISS index is serialized and written to GridFS. A MongoDB metadata record points to the latest snapshot.
 - The API caches a loaded FAISS object in memory. It checks MongoDB metadata and reloads the snapshot if another worker has updated it.
 - A per-user MongoDB lease serializes index updates across workers. A separate in-process lock prevents concurrent operations for the same user within one worker.
-- Old snapshots are deleted after a new snapshot is committed. If cleanup fails, an unused old GridFS blob may remain; the metadata still points to the latest index.
+- Previous snapshots are retained so concurrent readers can finish safely. A periodic retention cleanup job is not implemented yet, so GridFS storage grows as users add documents.
 
 This approach keeps FAISS while moving durable storage to MongoDB. It avoids relying on a paid persistent disk attached to the API host. MongoDB availability and sufficient GridFS storage are therefore required for document upload and retrieval.
 
