@@ -1,204 +1,125 @@
-"""
-Graph builder module for the adaptive RAG system.
-"""
+"""Build the adaptive RAG workflow."""
 
 from langchain_community.tools import TavilySearchResults
 from langchain_core.messages import AIMessage
 from langchain_core.prompts import PromptTemplate
-from langgraph.constants import START, END
+from langgraph.constants import END, START
 from langgraph.graph.state import StateGraph
 
-from src.rag.reAct_agent import agent_executor
-from src.rag.retriever_setup import get_retriever
 from src.config.settings import Config
 from src.llms.openai import llm
 from src.models.grade import Grade
 from src.models.route_identifier import RouteIdentifier
 from src.models.state import State
-from src.tools.graph_tools import routing_tool, doc_tool
+from src.rag.retriever_setup import get_vectorstore
+from src.tools.graph_tools import doc_tool, routing_tool
 
 config = Config()
 
 
-# Node implementations
 def query_classifier(state: State):
-    """
-    Classify the query to determine if it's related to indexed documents.
-
-    Args:
-        state (State): The current state of the graph.
-
-    Returns:
-        dict: Updated state with route and latest_query.
-    """
+    """Classify the question first; do not retrieve documents in this node."""
     question = state["messages"][-1].content
-    retriever = get_retriever()
-    context = retriever.invoke(question)
-    print("docs received from Qdrant")
-    print(context)
-
-    llm_with_structured_output = llm.with_structured_output(RouteIdentifier)
-    classify_prompt = PromptTemplate(
+    classifier = llm.with_structured_output(RouteIdentifier)
+    prompt = PromptTemplate(
         template=config.prompt("classify_prompt"),
-        input_variables=["question", "context"]
+        input_variables=["question"],
     )
-    chain = classify_prompt | llm_with_structured_output
-    result = chain.invoke({"question": question, "context": context})
-    print("result received is in query classifier")
-    print(result.route)
-
-    return {"messages": state["messages"], "route": result.route, "latest_query": question}
+    result = (prompt | classifier).invoke({"question": question})
+    return {
+        "route": result.route,
+        "original_question": question,
+        "latest_query": question,
+        "retrieval_attempts": 0,
+    }
 
 
 def general_llm(state: State):
-    """
-    Fetch general common knowledge result from the LLM.
-
-    Args:
-        state (State): The current state of the graph.
-
-    Returns:
-        dict: Updated messages from LLM.
-    """
+    """Answer conversational and common-knowledge questions directly."""
     result = llm.invoke(state["messages"])
-    print("inside general llm")
-    print(result)
-    return {"messages": result}
+    return {"messages": [result], "context": result.content}
 
 
 def retriever_node(state: State):
-    """
-    Retrieve results from vector stores using the reAct agent.
-
-    Args:
-        state (State): The current state of the graph.
-
-    Returns:
-        dict: Updated messages with tool calls.
-    """
-    messages = state["latest_query"]
-    result = agent_executor.invoke({"input": messages})
-
-    # Extract tool calls
-    intermediate_steps = result.get("intermediate_steps", [])
-    tool_calls = []
-    if intermediate_steps:
-        for action, tool_result in intermediate_steps:
-            tool_calls.append({
-                "tool": action.tool,
-                "input": action.tool_input,
-            })
-
-    new_message = AIMessage(
-        content=result["output"],
-        additional_kwargs={"tool_calls": tool_calls},
+    """Retrieve the top matching chunks from the current user's persisted index."""
+    user_id = state.get("user_id") or ""
+    store = get_vectorstore(user_id)
+    query = state.get("latest_query") or state.get("original_question") or ""
+    docs = store.similarity_search(query, k=4) if store is not None else []
+    context = "\n\n".join(
+        f"[Source: {doc.metadata.get('source', 'uploaded document')} | "
+        f"Chunk: {doc.metadata.get('chunk_index', 'n/a')}]\n{doc.page_content}"
+        for doc in docs
     )
-
+    if not context:
+        context = ""
+    attempt = state.get("retrieval_attempts", 0) + 1
     return {
-        "messages": [new_message]
+        "messages": [AIMessage(content=context or "No matching uploaded-document chunks found.")],
+        "context": context,
+        "retrieval_attempts": attempt,
     }
 
 
 def grade(state: State):
-    """
-    Grade the results retrieved from vector stores.
+    """Check whether the retrieved evidence can answer the original question."""
+    context = state.get("context") or ""
+    if not context.strip():
+        return {"binary_score": "no"}
 
-    Args:
-        state (State): The current state of the graph.
-
-    Returns:
-        dict: Updated state with binary_score.
-    """
-    grading_prompt = PromptTemplate(
+    grader = llm.with_structured_output(Grade)
+    prompt = PromptTemplate(
         template=config.prompt("grading_prompt"),
-        input_variables=["question", "context"]
+        input_variables=["question", "context"],
     )
-    context = state["messages"][-1].content
-    question = state["latest_query"]
-
-    llm_with_grade = llm.with_structured_output(Grade)
-
-    chain_graded = grading_prompt | llm_with_grade
-    result = chain_graded.invoke({"question": question, "context": context})
-
-    print(result)
-    return {"messages": state["messages"], "binary_score": result.binary_score}
+    result = (prompt | grader).invoke({
+        "question": state.get("original_question", ""),
+        "context": context,
+    })
+    score = result.binary_score.strip().lower()
+    return {"binary_score": "yes" if score == "yes" else "no"}
 
 
 def rewrite_query(state: State):
-    """
-    Rewrite the query to get better retrieval results.
-
-    Args:
-        state (State): State of the question.
-
-    Returns:
-        dict: Updated latest_query.
-    """
-    query = state["latest_query"]
-    rewrite_prompt = PromptTemplate(
+    """Rewrite only the retrieval query; retain the user's original question."""
+    prompt = PromptTemplate(
         template=config.prompt("rewrite_prompt"),
-        input_variables=["query"]
+        input_variables=["query"],
     )
-    chain = rewrite_prompt | llm
-    result = chain.invoke({"query": query})
-    print(result)
-
-    return {
-        "latest_query": result.content
-    }
+    result = (prompt | llm).invoke({"query": state.get("latest_query", "")})
+    rewritten = result.content.strip()
+    return {"latest_query": rewritten or state.get("latest_query", "")}
 
 
 def generate(state: State):
-    """
-    Generate the final answer for the user.
-
-    Args:
-        state (State): State of the question.
-
-    Returns:
-        dict: Generated response.
-    """
-    context = state["messages"][-1].content
-
-    generate_prompt = PromptTemplate(
+    """Answer the original question using the retrieved or searched evidence."""
+    context = state.get("context") or ""
+    question = state.get("original_question") or state.get("latest_query") or ""
+    prompt = PromptTemplate(
         template=config.prompt("generate_prompt"),
-        input_variables=["context"]
+        input_variables=["question", "context"],
     )
-
-    generate_chain = generate_prompt | llm
-    result = generate_chain.invoke({"context": context})
-
-    return {"messages": [{"role": "assistant", "content": result.content}]}
+    result = (prompt | llm).invoke({"question": question, "context": context})
+    return {"messages": [AIMessage(content=result.content)]}
 
 
 def web_search(state: State):
-    """
-    Search the web for the rewritten query.
-
-    Args:
-        state (State): The current state of the graph.
-
-    Returns:
-        dict: Search results as messages.
-    """
-    # Initialize the Tavily tool
-    search_tool = TavilySearchResults()
-
-    # Search a query
-    result = search_tool.invoke(state["latest_query"])
-
-    contents = [item["content"] for item in result if "content" in item]
-    print(contents)
-
-    return {
-        "messages": [{"role": "assistant", "content": "\n\n".join(contents)}]
-    }
+    """Use Tavily after search routing or when document retrieval is exhausted."""
+    question = state.get("original_question") or state.get("latest_query") or ""
+    try:
+        results = TavilySearchResults().invoke(state.get("latest_query") or question)
+        context = "\n\n".join(
+            f"[Web source: {item.get('url', 'URL unavailable')}]\n{item.get('content', '')}"
+            for item in results if item.get("content")
+        )
+    except Exception:
+        context = ""
+    if not context:
+        context = "No usable web results were available."
+    return {"context": context, "messages": [AIMessage(content=context)]}
 
 
-# Build the graph
 graph = StateGraph(State)
-
 graph.add_node("query_analysis", query_classifier)
 graph.add_node("retriever", retriever_node)
 graph.add_node("grade", grade)
@@ -208,13 +129,12 @@ graph.add_node("web_search", web_search)
 graph.add_node("general_llm", general_llm)
 
 graph.add_edge(START, "query_analysis")
-graph.add_edge("web_search", "generate")
-graph.add_edge("retriever", "grade")
-graph.add_edge("rewrite", "retriever")
 graph.add_conditional_edges("query_analysis", routing_tool)
+graph.add_edge("retriever", "grade")
 graph.add_conditional_edges("grade", doc_tool)
+graph.add_edge("rewrite", "retriever")
+graph.add_edge("web_search", "generate")
 graph.add_edge("generate", END)
 graph.add_edge("general_llm", END)
 
 builder = graph.compile()
-

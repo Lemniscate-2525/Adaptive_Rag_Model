@@ -1,89 +1,75 @@
-"""
-Document upload and processing module.
-"""
+"""Document validation, parsing, chunking, and indexing."""
 
 import os
 import tempfile
+import uuid
 
-from fastapi import UploadFile, File
+from fastapi import File, HTTPException, UploadFile
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from src.rag.retriever_setup import retriever_chain
+from src.rag.retriever_setup import index_documents
 from src.tools.common_tools import enhance_description_with_llm
 
 
-def documents(description: str, file: UploadFile = File(...)):
-    """
-    Process and upload a document for RAG.
-
-    Validates file type, loads content, enhances description, chunks documents,
-    and stores them in the vector database.
-
-    Args:
-        description: User-provided document description.
-        file: The uploaded file (PDF or TXT).
-
-    Returns:
-        Boolean indicating success of the upload process.
-
-    Raises:
-        HTTPException: If file type is not supported or loading fails.
-    """
-    filename = file.filename
-    print(filename)
-    if not filename.endswith(".pdf") and not filename.endswith(".txt"):
-        from fastapi import HTTPException
-        raise HTTPException(
-            status_code=400,
-            detail="Only PDF and TXT files are supported"
-        )
+def documents(description: str, file: UploadFile = File(...), user_id: str = ""):
+    """Parse a PDF/TXT upload and append its chunks to the owning user's index."""
+    filename = file.filename or "uploaded-document"
+    suffix = os.path.splitext(filename)[1].lower()
+    if suffix not in {".pdf", ".txt"}:
+        raise HTTPException(status_code=400, detail="Only PDF and TXT files are supported.")
+    if not user_id or not user_id.strip():
+        raise HTTPException(status_code=400, detail="X-User-ID is required.")
+    if not description or not description.strip():
+        raise HTTPException(status_code=400, detail="X-Description is required.")
 
     file_bytes = file.file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
 
-    with tempfile.NamedTemporaryFile(
-        delete=False,
-        suffix=os.path.splitext(filename)[1]
-    ) as tmp_file:
-        tmp_file.write(file_bytes)
-        tmp_path = tmp_file.name
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+            temp_file.write(file_bytes)
+            temp_path = temp_file.name
 
-    if filename.endswith(".pdf"):
-        loader = PyPDFLoader(tmp_path)
-    else:
-        loader = TextLoader(tmp_path, encoding="utf-8")
+        loader = PyPDFLoader(temp_path) if suffix == ".pdf" else TextLoader(
+            temp_path, encoding="utf-8"
+        )
+        loaded_docs = loader.load()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read uploaded file: {exc}") from exc
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+    if not loaded_docs or not any(doc.page_content.strip() for doc in loaded_docs):
+        raise HTTPException(
+            status_code=422,
+            detail="No readable text was found. Scanned PDFs need OCR before upload.",
+        )
 
     try:
-        docs = loader.load()
-    except Exception as e:
-        from fastapi import HTTPException
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error loading file: {e}"
-        )
-    finally:
-        os.unlink(tmp_path)
+        enhanced_description = enhance_description_with_llm(description.strip())
+    except Exception:
+        # Indexing should still work if optional description enhancement is unavailable.
+        enhanced_description = description.strip()
 
-    # Enhance description using LLM
-    description_llm = enhance_description_with_llm(description)
+    document_id = str(uuid.uuid4())
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+    chunks = splitter.split_documents(loaded_docs)
+    for index, chunk in enumerate(chunks):
+        chunk.metadata.update({
+            "user_id": user_id.strip(),
+            "document_id": document_id,
+            "source": filename,
+            "description": enhanced_description,
+            "chunk_index": index,
+        })
 
-    # Save enhanced description
-    with open("description.txt", "w", encoding="utf-8") as f:
-        f.write(description_llm)
+    try:
+        count = index_documents(user_id, chunks)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Document indexing failed: {exc}") from exc
 
-    with open("description.txt", "r", encoding="utf-8") as f:
-        print("Document description from storage:")
-        print(f.read())
-
-    # Split documents into chunks
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=150
-    )
-    chunks = splitter.split_documents(docs)
-
-    return retriever_chain(chunks)
-
-
-
-
+    return {"status": True, "document_id": document_id, "chunks_indexed": count}

@@ -1,123 +1,88 @@
-"""
-Retriever setup and vector store configuration.
-"""
+"""Persistent, user-scoped FAISS storage for uploaded documents."""
 
+import hashlib
 import os
+import threading
+from pathlib import Path
 
-from langchain_core.documents import Document
-from langchain_core.tools import create_retriever_tool
-from langchain_openai import OpenAIEmbeddings
-# from langchain_qdrant import QdrantVectorStore
+from filelock import FileLock
 from langchain_community.vectorstores import FAISS
-
-from src.core.config import settings
+from langchain_openai import OpenAIEmbeddings
+from langchain_core.documents import Document
 
 embeddings = OpenAIEmbeddings()
-
-# Global variable to store the FAISS vectorstore instance
-# This ensures get_retriever() can access documents stored by retriever_chain()
-_faiss_vectorstore = None
-
-
-def retriever_chain(chunks: list[Document]):
-    """
-    Initialize and store documents in FAISS vector database.
-
-    Args:
-        chunks: List of document chunks to store.
-
-    Returns:
-        Boolean indicating success of the operation.
-    """
-    global _faiss_vectorstore
-
-    try:
-        # Commenting out Qdrant code for temporary FAISS usage
-        # vectorstore = QdrantVectorStore.from_documents(
-        #     documents=chunks,
-        #     embedding=embeddings,
-        #     url=settings.QDRANT_URL,
-        #     api_key=settings.QDRANT_API_KEY,
-        #     collection_name=settings.CODE_COLLECTION,
-        # )
-        vectorstore = FAISS.from_documents(
-            documents=chunks,
-            embedding=embeddings
-        )
-
-        # Store the vectorstore globally so get_retriever() can access it
-        _faiss_vectorstore = vectorstore
-
-        print("FAISS vector store initialized with documents")
-        print(f"Vectorstore contains {len(chunks)} document chunks")
-        return True
-    except Exception as e:
-        print(f"Error storing documents in FAISS: {e}")
-        return False
+STORE_ROOT = Path(os.getenv("VECTORSTORE_DIR", "data/vectorstores")).resolve()
+_cache = {}
+_cache_guard = threading.Lock()
+_user_locks = {}
 
 
-def get_retriever():
-    """
-    Get a retriever tool connected to the FAISS vector store.
+def _user_key(user_id: str) -> str:
+    """Return a filesystem-safe, non-reversible namespace for a user."""
+    if not user_id or not user_id.strip():
+        raise ValueError("A non-empty user_id is required for document storage.")
+    return hashlib.sha256(user_id.strip().encode("utf-8")).hexdigest()
 
-    Returns the retriever tool that can search documents stored by retriever_chain().
-    If no documents have been uploaded yet, creates a retriever with a dummy document.
 
-    Returns:
-        A LangChain retriever tool configured for the vector store.
+def _paths(user_id: str):
+    key = _user_key(user_id)
+    STORE_ROOT.mkdir(parents=True, exist_ok=True)
+    store_dir = STORE_ROOT / key
+    lock = FileLock(str(STORE_ROOT / f"{key}.lock"))
+    return key, store_dir, lock
 
-    Raises:
-        Exception: If vector store initialization fails.
-    """
-    global _faiss_vectorstore
 
-    try:
-        # Commenting out Qdrant code for temporary FAISS usage
-        # vectorstore = QdrantVectorStore.from_documents(
-        #     documents=[],
-        #     embedding=embeddings,
-        #     url=settings.QDRANT_URL,
-        #     api_key=settings.QDRANT_API_KEY,
-        #     collection_name=settings.CODE_COLLECTION,
-        # )
-        # retriever = vectorstore.as_retriever()
+def _signature(store_dir: Path):
+    files = [store_dir / "index.faiss", store_dir / "index.pkl"]
+    if not all(path.exists() for path in files):
+        return None
+    return tuple((path.stat().st_mtime_ns, path.stat().st_size) for path in files)
 
-        # Use the global vectorstore if it exists (documents have been uploaded)
-        if _faiss_vectorstore is not None:
-            retriever = _faiss_vectorstore.as_retriever()
-            print("Using existing FAISS vectorstore with uploaded documents")
+
+def _load_locked(key: str, store_dir: Path):
+    signature = _signature(store_dir)
+    if signature is None:
+        _cache.pop(key, None)
+        return None
+    cached = _cache.get(key)
+    if cached and cached["signature"] == signature:
+        return cached["store"]
+    # Only load indexes created by this application in its own storage directory.
+    store = FAISS.load_local(
+        str(store_dir),
+        embeddings,
+        allow_dangerous_deserialization=True,
+    )
+    _cache[key] = {"store": store, "signature": signature}
+    return store
+
+
+def index_documents(user_id: str, chunks: list[Document]) -> int:
+    """Append chunks to the user's persistent index and return the chunk count."""
+    if not chunks:
+        raise ValueError("Cannot index an empty document.")
+    key, store_dir, lock = _paths(user_id)
+    with lock:
+        store = _load_locked(key, store_dir)
+        if store is None:
+            store = FAISS.from_documents(chunks, embeddings)
         else:
-            # No documents uploaded yet, create dummy for initialization
-            print("No documents uploaded yet, creating dummy vectorstore")
-            from langchain_core.documents import Document as LangChainDocument
+            store.add_documents(chunks)
+        # Readers and writers use the same cross-process file lock.
+        store.save_local(str(store_dir))
+        signature = _signature(store_dir)
+        _cache[key] = {"store": store, "signature": signature}
+    return len(chunks)
 
-            dummy_doc = LangChainDocument(
-                page_content="No documents have been uploaded yet. Please upload a document first.",
-                metadata={"source": "initialization"}
-            )
 
-            _faiss_vectorstore = FAISS.from_documents(
-                documents=[dummy_doc],
-                embedding=embeddings
-            )
-            retriever = _faiss_vectorstore.as_retriever()
+def get_vectorstore(user_id: str):
+    """Load the latest persisted index for this user, or return None if absent."""
+    key, store_dir, lock = _paths(user_id)
+    with lock:
+        return _load_locked(key, store_dir)
 
-        # Load document description
-        if os.path.exists("description.txt"):
-            with open("description.txt", "r", encoding="utf-8") as f:
-                description = f.read()
-        else:
-            description = None
 
-        retriever_tool = create_retriever_tool(
-            retriever,
-            "retriever_customer_uploaded_documents",
-            f"Use this tool **only** to answer questions about: {description}\n"
-            "Don't use this tool to answer anything else."
-        )
-
-        return retriever_tool
-
-    except Exception as e:
-        print(f"Error initializing retriever: {e}")
-        raise Exception(e)
+def get_retriever(user_id: str = "default"):
+    """Return a retriever for a user's own index; None means no upload yet."""
+    store = get_vectorstore(user_id)
+    return store.as_retriever(search_kwargs={"k": 4}) if store else None

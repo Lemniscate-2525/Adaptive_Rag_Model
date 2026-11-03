@@ -1,12 +1,9 @@
-"""
-Query request model.
-"""
+"""Request schema for a RAG query."""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class QueryRequest(BaseModel):
-    """Request model for RAG queries."""
-
-    query: str
-    session_id: str
+    query: str = Field(min_length=1, max_length=8000)
+    session_id: str = Field(min_length=1, max_length=256)
+    user_id: str | None = Field(default=None, min_length=1, max_length=256)
