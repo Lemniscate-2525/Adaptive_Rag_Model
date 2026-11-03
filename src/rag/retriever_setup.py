@@ -144,8 +144,16 @@ def index_documents(user_id: str, chunks: list[Document]) -> int:
 def get_vectorstore(user_id: str):
     """Return the cached index or reload the latest persisted version from MongoDB."""
     key = _user_key(user_id)
-    with _lock_for(key), _distributed_lock(key):
+    with _lock_for(key):
         return _load_locked(key)
+
+
+def similarity_search(user_id: str, query: str, k: int = 4):
+    """Search while holding the user's in-process lock against concurrent index writes."""
+    key = _user_key(user_id)
+    with _lock_for(key):
+        store = _load_locked(key)
+        return store.similarity_search(query, k=k) if store else []
 
 
 def get_retriever(user_id: str):
