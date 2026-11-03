@@ -13,7 +13,7 @@ from gridfs import GridFSBucket
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
-from pymongo import MongoClient
+from pymongo import MongoClient, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 MONGO_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
