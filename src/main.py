@@ -1,17 +1,29 @@
-"""
-Main FastAPI application entry point.
-"""
+"""FastAPI application entry point."""
+
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from src.api.routes import router
+from src.api.auth import initialize_auth_indexes, router as auth_router
+from src.api.routes import router as rag_router
 
-app = FastAPI(title="Adaptive RAG API")
-app.include_router(router)
-app.state.description_ = ""
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await initialize_auth_indexes()
+    yield
+
+
+app = FastAPI(title="Adaptive RAG API", version="1.0.0", lifespan=lifespan)
+app.include_router(auth_router)
+app.include_router(rag_router)
 
 
 @app.get("/")
 async def root():
-    """Root endpoint to verify API is running."""
     return {"message": "Adaptive RAG API is running"}
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}

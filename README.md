@@ -1,176 +1,227 @@
 # Adaptive RAG
 
-A document-question-answering API that chooses between a user's uploaded documents, a direct LLM answer, and web search. When document retrieval is selected, the system checks whether the retrieved text is relevant, rewrites a weak search query, and retries a bounded number of times.
+Adaptive RAG is a document-question-answering application that chooses how to answer a question instead of sending every request through the same retrieval pipeline.
 
-The repository contains a FastAPI backend, a Streamlit chat interface, a LangGraph workflow, OpenAI models and embeddings, a persistent FAISS index, MongoDB-backed chat history, and Tavily web search.
+A user can create an account, upload PDF or TXT files, and ask questions. The API decides whether the request should use that user's uploaded documents, go directly to the language model, or use web search. Document retrieval is checked before an answer is generated, and weak retrieval is retried only a bounded number of times.
 
-## What the system does
+## What is implemented
 
-- Accepts PDF and TXT uploads.
-- Splits readable document text into overlapping chunks and embeds them.
-- Stores chunks in a disk-backed FAISS index scoped to a user namespace.
-- Routes questions to document retrieval, the general LLM, or web search.
-- Grades retrieved evidence before generating a document-grounded answer.
-- Rewrites the retrieval query when evidence is weak, with a maximum of three retrieval attempts by default.
-- Keeps conversation history in MongoDB.
+- Account registration and login using hashed passwords and signed JWT access tokens.
+- Authenticated FastAPI endpoints for document upload and question answering.
+- PDF/TXT text extraction and overlapping text chunking.
+- OpenAI embeddings and FAISS similarity search.
+- Persistent FAISS index snapshots stored in MongoDB GridFS, not only on the API server's local disk.
+- Separate document indexes for each authenticated user.
+- An in-process index cache, with MongoDB metadata used to detect updated snapshots.
+- Per-user MongoDB leases to coordinate index reads and writes across API workers.
+- LangGraph routing, relevance grading, query rewriting, and a configurable retrieval-attempt limit.
+- Tavily web search for current/external questions and as a fallback when document retrieval remains weak.
+- MongoDB-backed conversation history.
+- Streamlit frontend that communicates with the FastAPI backend through a configurable URL.
 
 ## Architecture
+
+### Services and data
+
+```mermaid
+flowchart LR
+    U[User] --> UI[Streamlit frontend]
+    UI -->|HTTPS + JWT| API[FastAPI API]
+    API --> AUTH[JWT authentication]
+    AUTH --> USERS[(MongoDB users)]
+    API --> GRAPH[LangGraph workflow]
+    GRAPH --> LLM[OpenAI chat model]
+    GRAPH --> EMB[OpenAI embeddings]
+    GRAPH --> WEB[Tavily search]
+    GRAPH --> VDB[(MongoDB GridFS<br/>FAISS index snapshots)]
+    API --> CHAT[(MongoDB chat history)]
+    API --> INGEST[PDF/TXT ingestion]
+    INGEST --> EMB
+    EMB --> VDB
+```
 
 ### Document ingestion
 
 ```mermaid
 flowchart TD
-    A[PDF or TXT upload] --> B[FastAPI upload endpoint]
-    B --> C[Validate file and extract text]
-    C --> D[Split into chunks]
-    D --> E[Attach user, document and source metadata]
-    E --> F[OpenAI embeddings]
-    F --> G[User-scoped FAISS index on disk]
-    G --> H[In-process cache with file-change checks]
+    A[User selects PDF or TXT] --> B[Streamlit sends file + JWT]
+    B --> C[FastAPI verifies JWT]
+    C --> D[Extract readable text]
+    D --> E[Split into 1,000-character chunks<br/>150-character overlap]
+    E --> F[Attach source and document metadata]
+    F --> G[Create OpenAI embeddings]
+    G --> H[Update that user's FAISS index]
+    H --> I[Serialize index snapshot]
+    I --> J[Store snapshot in MongoDB GridFS]
+    J --> K[Update index metadata]
 ```
 
 ### Query flow
 
 ```mermaid
 flowchart TD
-    A[Question + user namespace] --> B[Load conversation history]
-    B --> C[LangGraph: classify question only]
-    C -->|index| D[Search that user's FAISS index]
-    D --> E[Grade retrieved evidence]
-    E -->|relevant| F[Generate using original question + evidence]
-    E -->|not relevant and attempts remain| G[Rewrite retrieval query]
-    G --> D
-    E -->|retry limit reached| H[Tavily web search]
-    C -->|general| I[Direct LLM response]
-    C -->|search| H
-    H --> F
-    F --> J[Return answer and save chat history]
-    I --> J
+    A[Question + JWT] --> B[Authenticate user]
+    B --> C[Load conversation history]
+    C --> D[Classify question]
+    D -->|Uploaded-document question| E[Search user's FAISS index]
+    E --> F[Grade evidence relevance]
+    F -->|Relevant| G[Generate using original question + evidence]
+    F -->|Not relevant, attempts remain| H[Rewrite retrieval query]
+    H --> E
+    F -->|Attempt limit reached| I[Tavily web search]
+    D -->|General question| J[Direct LLM response]
+    D -->|Current/external question| I
+    I --> G
+    G --> K[Return answer and save history]
+    J --> K
 ```
 
-The classifier does **not** retrieve documents. Retrieval begins only when it selects the `index` route. The original user question is kept separately from the rewritten retrieval query so the final answer still addresses what the user actually asked.
+The classifier runs before document retrieval. A general question does not incur a vector search. The original question is retained separately from any rewritten retrieval query, so the final response still answers what the user asked.
 
-## Routing rules
+## Routing behavior
 
-| Route | Used for | Path |
+| Route | When it is selected | What happens |
 |---|---|---|
-| `index` | Questions about uploaded material | Retrieve → grade → answer, or rewrite and retry |
-| `general` | Conversation and stable common knowledge | Direct LLM response |
-| `search` | Current or external information | Tavily search → answer from search results |
+| `index` | The question refers to a user's uploaded material | Retrieve → grade → answer, or rewrite and retry |
+| `general` | Conversation or stable common knowledge | Direct LLM response |
+| `search` | Current, time-sensitive, or external information | Tavily search → answer from returned context |
 
-The classifier makes this choice from the question alone. A document-related question with no matching uploaded evidence can still reach web search after the retrieval limit is exhausted.
+The classifier chooses a route from the question. The retrieval grader checks whether the returned text contains useful evidence for the original question.
 
-## Retrieval, persistence and user isolation
+## Persistent multi-user document storage
 
-- **Persistent storage:** FAISS indexes are saved under `VECTORSTORE_DIR`, which defaults to `data/vectorstores/`. An index is loaded from disk when needed, so an API process restart does not by itself erase indexed documents.
-- **User namespaces:** Each user ID is hashed into a filesystem-safe directory name. Uploads append to that user's index; query retrieval opens only that namespace.
-- **Cache:** Loaded FAISS objects are cached in the process. The index file signatures are checked so an index changed by another process can be reloaded.
-- **Write coordination:** A per-user file lock coordinates reads and writes to an index on a shared local filesystem.
-- **Trusted storage only:** LangChain's local FAISS loader deserializes its saved document metadata. Keep the index directory under trusted application control; never load index files supplied by an untrusted user.
-- **Metadata:** Chunks include source filename, document ID, chunk number, user ID and the document description.
+The active vector store is FAISS. Its serialized index snapshots are stored in **MongoDB GridFS** so uploaded documents are not tied to the lifetime of a Render instance's local filesystem.
 
-This is a practical persistent local-storage design, not a managed distributed vector database. Multiple workers must share the same persistent filesystem for the indexes to be visible to each other. For separate containers, ephemeral hosting disks, or larger deployments, use a shared vector service such as Qdrant instead. The active retrieval code currently uses FAISS; Qdrant is not the active backend.
+- Each authenticated account has its own index namespace, derived from the immutable user ID in the verified JWT.
+- Chunk metadata includes source filename, document ID, chunk number, and the owning user ID.
+- After an upload, the updated FAISS index is serialized and written to GridFS. A MongoDB metadata record points to the latest snapshot.
+- The API caches a loaded FAISS object in memory. It checks MongoDB metadata and reloads the snapshot if another worker has updated it.
+- A per-user MongoDB lease serializes index updates across workers. A separate in-process lock prevents concurrent operations for the same user within one worker.
+- Previous snapshots are retained so concurrent readers can finish safely. A periodic retention cleanup job is not implemented yet, so GridFS storage grows as users add documents.
 
-The user ID is currently supplied by the API client in `X-User-ID` or the query request. It is a **namespace key, not authentication**. A production deployment must validate the caller's identity on the server and derive the namespace from verified credentials rather than trusting a caller-provided header.
+This approach keeps FAISS while moving durable storage to MongoDB. It avoids relying on a paid persistent disk attached to the API host. MongoDB availability and sufficient GridFS storage are therefore required for document upload and retrieval.
 
-## Retry and answer behavior
+## Authentication and user isolation
 
-1. The first retrieval attempt searches with the original question.
-2. If the grader says the evidence is not relevant, the query is rewritten and retrieval is repeated.
-3. The workflow stops retrying after `MAX_RETRIEVAL_ATTEMPTS` attempts (default: `3`).
-4. If evidence remains inadequate, the workflow tries web search instead of looping indefinitely.
-5. The answer prompt receives both the original question and the retrieved context. It instructs the model to state when the evidence is insufficient rather than inventing facts.
+The Streamlit frontend no longer calls the old Rust authentication service. Registration and login are handled by FastAPI:
 
-Set `MAX_RETRIEVAL_ATTEMPTS` to a positive integer to change the limit. The prompt-level grounding instruction reduces unsupported answers but is not a formal guarantee of factual correctness.
+1. A user registers with a username and password.
+2. The API stores a bcrypt password hash, never the plaintext password.
+3. Login returns a signed JWT with a 24-hour expiry.
+4. Upload and query endpoints require that JWT in the `Authorization: Bearer <token>` header.
+5. The API derives the document namespace from the verified token. It does not trust a user ID supplied in the request body or upload headers.
 
-## Main components
+Set a strong random `JWT_SECRET_KEY` of at least 32 characters. Changing this secret invalidates existing login tokens.
 
-| Path | Responsibility |
-|---|---|
-| `src/api/routes.py` | Query and document-upload API endpoints |
-| `src/rag/graph_builder.py` | LangGraph nodes and workflow edges |
-| `src/tools/graph_tools.py` | Route selection and retry-limit decisions |
-| `src/rag/retriever_setup.py` | Persistent per-user FAISS storage, cache and file locking |
-| `src/rag/document_upload.py` | PDF/TXT parsing, chunking, metadata and indexing |
-| `src/config/prompts.yaml` | Classification, grading, rewriting and answer prompts |
-| `src/models/state.py` | State passed between graph nodes |
-| `src/memory/chat_history_mongo.py` | MongoDB conversation history |
-| `streamlit_app/pages/chat.py` | Chat and upload interface |
-| `streamlit_app/utils/api_client.py` | Streamlit-to-FastAPI requests |
+## Retrieval and answer behavior
 
-## API contract
+1. The first document search uses the original question.
+2. The grader returns `yes` when the retrieved text contains useful evidence; otherwise it returns `no`.
+3. If evidence is weak, the workflow rewrites the retrieval query and searches again.
+4. The workflow stops after `MAX_RETRIEVAL_ATTEMPTS` retrievals (default: `3`).
+5. If evidence is still weak, it attempts Tavily web search instead of looping indefinitely.
+6. The answer prompt receives both the original question and the evidence context. It tells the model to identify missing evidence rather than invent details.
 
-### `POST /rag/documents/upload`
+The prompt improves grounding but does not guarantee factual correctness. The separate answer-verification prompt in the repository is not connected to the active graph.
 
-Multipart form field: `file`
+## API endpoints
 
-Required headers:
+All endpoints below are served by the FastAPI backend.
 
-- `X-Description`: a short description of the document.
-- `X-User-ID`: the namespace into which the document should be indexed.
+| Method | Endpoint | Authentication | Purpose |
+|---|---|---|---|
+| GET | `/` | No | Basic API status |
+| GET | `/health` | No | Render health check |
+| POST | `/auth/register` | No | Create an account |
+| POST | `/auth/login` | No | Obtain a JWT |
+| POST | `/rag/documents/upload` | Bearer JWT | Upload and index a PDF/TXT file |
+| POST | `/rag/query` | Bearer JWT | Ask a question |
 
-Supports `.pdf` and `.txt`. The response includes the generated document ID and number of indexed chunks. Scanned PDFs without an extractable text layer require OCR, which is not implemented here.
+### Registration and login payload
 
-### `POST /rag/query`
+```json
+{
+  "username": "sample_user",
+  "password": "a-long-password"
+}
+```
 
-JSON request:
+Usernames must be 3–40 characters and may contain letters, numbers, underscores, dots, and hyphens. Passwords must contain at least 8 characters.
+
+### Query payload
 
 ```json
 {
   "query": "What does the document say about indexing?",
-  "session_id": "conversation-session",
-  "user_id": "user-namespace"
+  "session_id": "client-generated-session-id"
 }
 ```
 
-`user_id` selects the document index; `session_id` selects conversation history. If `user_id` is omitted, the API uses `session_id` as the namespace.
+The user identity comes from the bearer token. The client cannot choose which user's document index is searched.
 
-## Failure cases and current limits
+### Document upload
+
+Send a multipart file field named `file`, the `X-Description` header, and a bearer token. Supported extensions are `.pdf` and `.txt`. Scanned PDFs without an extractable text layer require OCR, which is not implemented.
+
+## Deployment layout
+
+The repository is configured for a split deployment:
+
+- **FastAPI backend:** Render, using `render.yaml`.
+- **Streamlit frontend:** Streamlit Community Cloud, with `streamlit_app/home.py` as the app entry point.
+- **Database and durable vector snapshots:** MongoDB Atlas or another reachable MongoDB deployment with GridFS enabled.
+
+The Streamlit app needs one secret:
+
+```toml
+BACKEND_URL = "https://<your-render-service>.onrender.com"
+```
+
+The backend needs these environment variables:
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `OPENAI_API_KEY` | Yes | Chat model and embeddings |
+| `TAVILY_API_KEY` | Yes for web search | External search |
+| `MONGODB_URL` | Yes | MongoDB connection string |
+| `MONGODB_DB_NAME` | No | Database name; defaults to `adaptive_rag` |
+| `JWT_SECRET_KEY` | Yes | Signs and verifies login tokens; minimum 32 characters |
+| `MAX_RETRIEVAL_ATTEMPTS` | No | Maximum document retrieval attempts; defaults to `3` |
+
+The Render blueprint marks credentials as secrets to be supplied in the Render dashboard. Never commit real API keys, database credentials, or JWT secrets.
+
+## Failure cases and current limitations
 
 | Failure case | Current behavior / limitation |
 |---|---|
-| No document uploaded for this user | Retrieval has no index; after the bounded attempts, the workflow tries web search. |
-| Retrieved chunks are unrelated | The grader rejects them; the query is rewritten up to the configured limit. |
-| Tavily fails or returns no usable results | The answer node receives a message that no usable web results were available; the resulting answer may be limited. |
-| OpenAI API key, quota or model call fails | The affected request can fail. There is no general retry/backoff policy for provider errors yet. |
-| Scanned PDF or unsupported file type | Unsupported types are rejected; a PDF with no extractable text returns a readable error and needs OCR upstream. |
-| API process restarts | Indexed documents remain if `VECTORSTORE_DIR` is on persistent storage. |
-| Hosting platform uses ephemeral disk | Indexes can disappear when the platform replaces the instance. Mount persistent storage or use a shared vector service. |
-| Multiple workers on separate filesystems | They do not share local FAISS files. Use shared persistent storage or a vector database service. |
-| Two users upload similar documents | Their indexes remain separate when each request uses the correct, verified user namespace. |
-| Caller spoofs `X-User-ID` | The current API does not verify identity itself. Add server-side authentication and authorization before exposing it publicly. |
-| Two uploads for one user happen concurrently | File locking coordinates index updates on a shared local filesystem; deployment storage must support reliable file locks. |
-| Answer contains unsupported claims | The prompt tells the model to disclose missing evidence, but no automatic final-answer faithfulness check is wired into the graph. Validate answers before treating them as authoritative. |
-| Chat history database is unavailable | Query handling can fail because MongoDB is the configured chat-history store; no durable fallback is wired into the API path. |
+| Invalid or expired JWT | Protected API endpoints return HTTP 401. |
+| Duplicate username | Registration returns HTTP 409. |
+| MongoDB is unavailable | API startup, authentication, chat history, or persistent index operations can fail. |
+| No documents uploaded for the user | No FAISS index is found; the workflow proceeds through its bounded retrieval path and can fall back to web search. |
+| Retrieved chunks are unrelated | The grader rejects them; query rewriting and retrieval repeat up to the configured limit. |
+| Tavily fails or returns no useful results | The workflow receives an empty-results message; answer quality is limited. |
+| OpenAI quota, key, or provider error | The affected request can fail. General provider retry/backoff is not implemented. |
+| Scanned PDF or unsupported file | Unsupported extensions are rejected; scanned PDFs need OCR before upload. |
+| API process restarts or Render replaces an instance | FAISS snapshots remain in MongoDB GridFS; the in-memory cache is rebuilt on demand. |
+| Two users upload documents with similar content | Their indexes remain isolated by verified user ID. |
+| Two requests update one user's index concurrently | A MongoDB lease and local lock serialize writes for that user. A crashed worker's lease expires after 30 minutes. |
+| GridFS upload succeeds but metadata update fails | An orphaned blob may remain; the previous metadata pointer remains authoritative. |
+| Streamlit cannot reach the API | The frontend displays a backend connection error; check the configured `BACKEND_URL` and backend health endpoint. |
+| Unsupported factual answer | The prompt asks the model to disclose missing evidence, but automated final-answer faithfulness verification is not wired into the graph. |
 
-## Technology actually used
+## Technology used
 
-- **Workflow:** LangGraph
-- **LLM and embeddings:** LangChain OpenAI integration
-- **Vector search:** FAISS, persisted to local disk and separated by user namespace
-- **Web search:** Tavily
-- **API:** FastAPI
-- **Chat history:** MongoDB via Motor
 - **Frontend:** Streamlit
-- **Document loaders:** LangChain PDF and text loaders
-- **Chunking:** Recursive character splitting, 1,000-character chunks with 150-character overlap
+- **API:** FastAPI + Uvicorn
+- **Workflow:** LangGraph
+- **LLM:** OpenAI GPT-4o
+- **Embeddings:** OpenAI `text-embedding-3-small`
+- **Vector search:** FAISS
+- **Persistent index storage:** MongoDB GridFS
+- **Conversation history and user accounts:** MongoDB
+- **Authentication:** bcrypt password hashing + JWT
+- **Web search:** Tavily
+- **Document parsing:** LangChain PDF/TXT loaders
+- **Chunking:** Recursive character splitting, 1,000 characters with 150-character overlap
 
-Qdrant configuration and an answer-verification prompt exist in the repository, but Qdrant is not the active vector store and the verification prompt is not currently connected to the graph. They are therefore not described as implemented features.
-
-## Configuration
-
-The backend expects provider credentials in environment variables:
-
-- `OPENAI_API_KEY`
-- `TAVILY_API_KEY`
-
-Optional settings:
-
-- `VECTORSTORE_DIR`: persistent index directory; defaults to `data/vectorstores`.
-- `MAX_RETRIEVAL_ATTEMPTS`: retrieval-attempt limit; defaults to `3`.
-- `MONGODB_URL`: MongoDB connection string; defaults to `mongodb://localhost:27017`.
-- `MONGODB_DB_NAME`: MongoDB database name; defaults to `adaptive_rag`.
-
-## Scope
-
-This project demonstrates adaptive routing, relevance grading, query rewriting, bounded retrieval retries, web-search fallback, persistent user-scoped document indexes, and grounded generation. It is not yet a production-hardened multi-tenant service: authentication enforcement, provider retry/backoff, OCR, automated evaluation, and a connected final-answer faithfulness verifier remain future work.
+Qdrant configuration guides and the older ReAct agent remain in the repository as reference material. They are not part of the active query path.

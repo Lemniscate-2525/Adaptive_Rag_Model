@@ -1,65 +1,58 @@
-"""Chat page for the Streamlit application."""
+"""Authenticated chat and document-upload interface."""
 
 import streamlit as st
 
 from streamlit_app.utils.api_client import document_upload_rag, query_backend
 
-st.set_page_config(
-    page_title="Adaptive RAG",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="Adaptive RAG | Chat", page_icon="🔎", layout="wide")
 
-if "session_id" not in st.session_state or "jwt_token" not in st.session_state:
-    st.warning("Please log in first.")
-    st.stop()
+if not st.session_state.get("access_token"):
+    st.warning("Please sign in to continue.")
+    st.switch_page("home.py")
 
-user_id = st.session_state.get("username")
-if not user_id:
-    st.warning("Your user session is missing. Please log in again.")
-    st.stop()
-
-col1, col2 = st.columns([10, 2])
-with col2:
-    if st.button("Log out", use_container_width=True):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.switch_page("Home.py")
-
-st.title("Adaptive RAG")
+access_token = st.session_state["access_token"]
+username = st.session_state.get("username", "user")
+session_id = st.session_state["session_id"]
 
 with st.sidebar:
+    st.subheader(f"Signed in as {username}")
+    if st.button("Sign out", use_container_width=True):
+        for key in ("access_token", "user_id", "username", "session_id", "chat_history"):
+            st.session_state.pop(key, None)
+        st.switch_page("home.py")
+
+    st.divider()
     st.header("Upload a document")
-    uploaded_file = st.file_uploader("Choose a PDF or TXT file", type=["pdf", "txt"])
-    if uploaded_file:
-        description = st.text_input(
-            "What is this document about?",
-            max_chars=300,
-            placeholder="For example: lecture notes on database indexing",
-        )
-        if description and st.button("Upload and index"):
-            with st.spinner("Reading and indexing document..."):
-                success = document_upload_rag(uploaded_file, description, user_id)
-            if success:
-                st.success(f"Indexed {uploaded_file.name} for {user_id}.")
-            else:
-                st.error("Upload failed. Check the API response/logs and try again.")
+    uploaded_file = st.file_uploader("PDF or TXT", type=["pdf", "txt"])
+    description = st.text_area(
+        "What is this document about?",
+        max_chars=300,
+        placeholder="e.g. Lecture notes on database indexing",
+    )
+    if st.button("Upload and index", disabled=not uploaded_file or not description.strip()):
+        with st.spinner("Extracting, chunking and indexing..."):
+            success, message = document_upload_rag(uploaded_file, description, access_token)
+        if success:
+            st.success(message)
+        else:
+            st.error(message)
+
+st.title("Adaptive RAG")
+st.caption("Questions are routed to your documents, the general assistant, or web search.")
 
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+    st.session_state["chat_history"] = []
 
-for role, text in st.session_state.chat_history:
-    st.chat_message(role).write(text)
+for role, message in st.session_state["chat_history"]:
+    st.chat_message(role).write(message)
 
-user_input = st.chat_input("Ask a question...")
-if user_input:
-    st.session_state.chat_history.append(("user", user_input))
+question = st.chat_input("Ask a question...")
+if question and question.strip():
+    st.session_state["chat_history"].append(("user", question))
+    with st.chat_message("user"):
+        st.write(question)
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
-            response = query_backend(
-                user_input,
-                st.session_state["jwt_token"],
-                user_id=user_id,
-            )
-        st.write(response)
-    st.session_state.chat_history.append(("assistant", response))
+            answer = query_backend(question, session_id, access_token)
+        st.write(answer)
+    st.session_state["chat_history"].append(("assistant", answer))

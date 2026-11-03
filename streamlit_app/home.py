@@ -1,79 +1,56 @@
-"""
-Home page for Streamlit authentication interface.
-"""
+"""Login and registration page."""
 
-import logging
+import uuid
 
 import streamlit as st
 
-from utils.api_client import create_user, login_user, get_api_token
+from streamlit_app.utils.api_client import login_user, register_user
 
-# Hide sidebar for cleaner look
-hide_sidebar_style = """
-    <style>
-        [data-testid="stSidebarNav"] {
-            display: none;
-        }
-    </style>
-"""
-st.markdown(hide_sidebar_style, unsafe_allow_html=True)
+st.set_page_config(page_title="Adaptive RAG | Sign in", page_icon="🔎", layout="centered")
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    filename="app.log",
-    filemode="a",
-)
-logger = logging.getLogger(__name__)
+st.title("Adaptive RAG")
+st.caption("Ask questions across your own uploaded documents.")
 
-st.set_page_config(page_title="LangGraph Chat - Login")
+if st.session_state.get("access_token"):
+    st.success(f"Signed in as {st.session_state.get('username', 'user')}.")
+    if st.button("Open chat", type="primary", use_container_width=True):
+        st.switch_page("pages/chat.py")
+    if st.button("Sign out", use_container_width=True):
+        for key in ("access_token", "user_id", "username", "session_id", "chat_history"):
+            st.session_state.pop(key, None)
+        st.rerun()
+    st.stop()
 
-st.title("🔐 Welcome to LangGraph Assistant")
-
-token = ""
-
-# Step 1: Fetch API token only once per session
-if "session_id" not in st.session_state:
-    token = get_api_token()
-    if token:
-        st.session_state["session_id"] = token
-        st.success("API token initialized.")
-    else:
-        st.error("Failed to initialize API token.")
-        st.stop()
-
-# Step 2: Render login/signup form
+mode = st.radio("Account", ["Sign in", "Create account"], horizontal=True)
 with st.form("auth_form"):
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-    mode = st.radio("Choose action:", ["Login", "Create Account"])
-    submit = st.form_submit_button("Submit")
+    username = st.text_input("Username", max_chars=40)
+    password = st.text_input("Password", type="password", max_chars=72)
+    submitted = st.form_submit_button(
+        "Sign in" if mode == "Sign in" else "Create account",
+        type="primary",
+        use_container_width=True,
+    )
 
-# Step 3: Handle login/account creation
-if submit:
-    if not username or not password:
-        st.error("Username and password required.")
-    else:
-        if mode == "Create Account":
-            success = create_user(username, password, st.session_state["session_id"])
-            if success:
-                st.success("User created. Please log in.")
-            else:
-                st.error("User creation failed.")
+if submitted:
+    if not username.strip() or not password:
+        st.error("Enter both username and password.")
+    elif mode == "Create account":
+        if len(password) < 8:
+            st.error("Use a password with at least 8 characters.")
         else:
-            response = login_user(username, password, st.session_state["session_id"])
-            if response and response.get("jwt"):
-                st.session_state["jwt_token"] = response["jwt"]
-                st.session_state["username"] = username
-                st.switch_page("pages/Chat.py")
+            success, message = register_user(username, password)
+            if success:
+                st.success(message + " You can now sign in.")
             else:
-                st.error("Login failed. Downstream API error: Received empty JWT token.")
-
-# Debug logs section
-with st.expander("📜 Debug Logs"):
-    try:
-        with open("app.log", "r") as log_file:
-            st.text(log_file.read())
-    except FileNotFoundError:
-        st.warning("Log file not found yet.")
+                st.error(message)
+    else:
+        response, error = login_user(username, password)
+        if response:
+            st.session_state["access_token"] = response["access_token"]
+            st.session_state["user_id"] = response["user_id"]
+            st.session_state["username"] = response["username"]
+            st.session_state["session_id"] = str(uuid.uuid4())
+            st.session_state["chat_history"] = []
+            st.switch_page("pages/chat.py")
+        else:
+            st.error(error)
