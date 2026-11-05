@@ -11,12 +11,20 @@ from src.models.query_request import QueryRequest
 from src.rag.document_upload import documents
 from src.rag.graph_builder import builder
 
+from src.api.rate_limit import enforce_rate_limit
+
 router = APIRouter()
 
 
 @router.post("/rag/query")
 async def rag_query(req: QueryRequest, current_user: dict = Depends(get_current_user)):
     """Run the workflow using the authenticated user's private document index."""
+    await enforce_rate_limit(
+    "rag_query",
+    current_user["user_id"],
+    max_requests=30,
+    window_seconds=60,
+)
     session_id = f"{current_user['user_id']}:{req.session_id}"
     chat_history = ChatHistory.get_session_history(session_id)
     await chat_history.add_message(HumanMessage(content=req.query))
@@ -38,6 +46,12 @@ async def upload_file(
     current_user: dict = Depends(get_current_user),
 ):
     """Index an upload under the identity verified from the bearer token."""
+    await enforce_rate_limit(
+    "rag_upload",
+    current_user["user_id"],
+    max_requests=10,
+    window_seconds=3600,
+)
     if not description.strip():
         raise HTTPException(status_code=400, detail="X-Description must not be empty.")
     result = await asyncio.to_thread(
